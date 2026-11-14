@@ -54,24 +54,28 @@ class AoEConfig:
     d_model: int
     n_heads: int
     n_kv_heads: int
-    n_experts: int
+    expert_hidden_dim: int
+    n_routed_experts: int
+    n_shared_experts: int
     top_k: int
-    d_low: int
-    d_wide: int
+    aoe_rank: int
 
     def __post_init__(self) -> None:
         for field in fields(self):
             value = getattr(self, field.name)
-            if type(value) is not int or value <= 0:
+            if field.name == "n_shared_experts":
+                if type(value) is not int or value < 0:
+                    raise ValueError("n_shared_experts must be a non-negative integer")
+            elif type(value) is not int or value <= 0:
                 raise ValueError(
                     f"{field.name} must be a positive integer, got {value}"
                 )
 
-        if self.top_k > self.n_experts:
-            raise ValueError("top_k must be an integer in [1, n_experts]")
-        if not self.d_low < self.d_model < self.d_wide:
-            raise ValueError("Expected d_low < d_model < d_wide")
-
+        if self.top_k > self.n_routed_experts:
+            raise ValueError("top_k must be an integer in [1, n_routed_experts]")
+        if self.aoe_rank >= self.d_model:
+            raise ValueError("aoe_rank must be less than d_model")
+        
         _validate_attention_dimensions(
             self.d_model, self.n_heads, self.n_kv_heads
         )
@@ -111,16 +115,15 @@ def aoe_config() -> AoEConfig:
         d_model=512,
         n_heads=8,
         n_kv_heads=4,
-        n_experts=9,
+        expert_hidden_dim=544,
+        n_routed_experts=9,
+        n_shared_experts=0,
         top_k=3,
-        d_low=32,
-        d_wide=544,
+        aoe_rank=32,
     )
 
 
-def _count_backbone_parameters(
-    config: Union[ModelConfig, AoEConfig],
-) -> tuple[int, int, int]:
+def _count_backbone_parameters(config: Union[ModelConfig, AoEConfig],) -> tuple[int, int, int]:
     d_model = config.d_model
     n_layers = config.n_layers
     head_dim = d_model // config.n_heads
@@ -156,16 +159,15 @@ def count_parameters(config: ModelConfig) -> dict[str, int]:
 
 
 def count_aoe_parameters(config: AoEConfig) -> dict[str, int]:
+    d_model = config.d_model
+    n_layers = config.n_layers
+    expert_hidden_dim = config.expert_hidden_dim
     embedding_head, attention, rmsnorm = _count_backbone_parameters(config)
-    backbone = embedding_head + attention + rmsnorm
+    base = embedding_head + attention + rmsnorm
 
-    down = config.d_model * config.d_low
-    remaining = (config.d_low + 2 * config.d_model) * config.d_wide
-
-    expert_total = config.n_layers * config.n_experts * (down + remaining)
-    expert_active = config.n_layers * (
-        config.n_experts * down + config.top_k * remaining
-    )
+    per_expert = d_model * config.aoe_rank + config.aoe_rank * expert_hidden_dim + 2 * expert_hidden_dim * d_model
+    expert_total = n_layers * per_expert * (config.n_routed_experts + config.n_shared_experts)
+    expert_active = n_layers * per_expert * (config.top_k + config.n_shared_experts) + n_layers * (config.n_routed_experts - config.top_k) * d_model * config.aoe_rank 
 
     return {
         "embedding_head": embedding_head,
@@ -174,8 +176,8 @@ def count_aoe_parameters(config: AoEConfig) -> dict[str, int]:
         "router": 0,
         "expert_total": expert_total,
         "expert_active": expert_active,
-        "total": backbone + expert_total,
-        "active": backbone + expert_active,
+        "total": base + expert_total,
+        "active": base + expert_active,
     }
 
 
