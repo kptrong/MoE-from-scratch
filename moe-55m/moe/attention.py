@@ -1,7 +1,7 @@
 import torch
 import math
 from torch import nn
-from .config import ModelConfig
+from .config import AoEConfig, ModelConfig
 
 
 class RotaryEmbedding(nn.Module):
@@ -71,7 +71,11 @@ class RotaryEmbedding(nn.Module):
         )
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, config: ModelConfig, rope_base: float = 10_000.0,) -> None:
+    def __init__(
+        self,
+        config: ModelConfig | AoEConfig,
+        rope_base: float = 10_000.0,
+    ) -> None:
         super().__init__()
         self.d_model = config.d_model
         self.n_heads = config.n_heads

@@ -1,19 +1,22 @@
 import torch
 from torch import nn
 
+from .aoe import AoELayer
 from .attention import CausalSelfAttention
-from .config import ModelConfig
+from .config import AoEConfig, ModelConfig
 from .layers import RMSNorm
 from .moe_layer import MoELayer
 
 class TransformerBlock(nn.Module):
-    def __init__(self, config: ModelConfig,) -> None:
+    def __init__(self, config: ModelConfig | AoEConfig,) -> None:
         super().__init__()
         self.attn_norm = RMSNorm(dim = config.d_model, eps = 1e-5)
         self.attention = CausalSelfAttention(config)
 
         self.moe_norm = RMSNorm(dim = config.d_model, eps = 1e-5)
-        self.moe = MoELayer(config)
+        self.moe = (
+            AoELayer(config) if isinstance(config, AoEConfig) else MoELayer(config)
+        )
 
     def forward(self, x: torch.Tensor,) -> tuple[torch.Tensor, torch.Tensor]:
         x = x + self.attention(self.attn_norm(x)) # Residual connection for attention 
@@ -22,7 +25,7 @@ class TransformerBlock(nn.Module):
         return x + moe_output, router_logits
 
 class MoELanguageModel(nn.Module):
-    def __init__(self, config: ModelConfig,) -> None:
+    def __init__(self, config: ModelConfig | AoEConfig,) -> None:
         super().__init__()
 
         # Khởi tạo embedding cho các token trong từ điển
@@ -63,7 +66,7 @@ class MoELanguageModel(nn.Module):
 
         x = self.final_norm(x)
         # logits: tensor dự đoán xác suất cho từng token trong từ điển, có kích thước (batch_size, seq_len, vocab_size)
-        # router_logits_per_layer: tuple chứa các tensor dự đoán xác suất cho từng expert
+        # Router logits (MoE) or L2 scores (AoE), in block order.
         logits = self.lm_head(x)
 
         return logits, tuple(router_logits_per_layer)
