@@ -1,4 +1,5 @@
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
+from typing import Union
 
 # dataclasses: Một mô-đun trong Python cung cấp một cách tiện lợi để định nghĩa các lớp dữ liệu (data classes) mà không cần phải viết nhiều mã lặp lại. Nó tự động tạo ra các phương thức như __init__, __repr__, __eq__, và các phương thức khác dựa trên các trường được định nghĩa trong lớp.
 
@@ -41,12 +42,50 @@ class ModelConfig:
             raise ValueError("top_k must be an integer in [1, n_routed_experts]")
 
         # Kiểm tra tính hợp lệ của các trường liên quan đến attention heads
-        if self.d_model % self.n_heads != 0:
-            raise ValueError("d_model must be divisible by n_heads")
-        if self.n_heads % self.n_kv_heads != 0:
-            raise ValueError("n_heads must be divisible by n_kv_heads")
-        if (self.d_model // self.n_heads) % 2 != 0:
-            raise ValueError("head_dim (d_model // n_heads) must be even")
+        _validate_attention_dimensions(
+            self.d_model, self.n_heads, self.n_kv_heads
+        )
+
+
+@dataclass(frozen=True)
+class AoEConfig:
+    vocab_size: int
+    n_layers: int
+    d_model: int
+    n_heads: int
+    n_kv_heads: int
+    n_experts: int
+    top_k: int
+    d_low: int
+    d_wide: int
+
+    def __post_init__(self) -> None:
+        for field in fields(self):
+            value = getattr(self, field.name)
+            if type(value) is not int or value <= 0:
+                raise ValueError(
+                    f"{field.name} must be a positive integer, got {value}"
+                )
+
+        if self.top_k > self.n_experts:
+            raise ValueError("top_k must be an integer in [1, n_experts]")
+        if not self.d_low < self.d_model < self.d_wide:
+            raise ValueError("Expected d_low < d_model < d_wide")
+
+        _validate_attention_dimensions(
+            self.d_model, self.n_heads, self.n_kv_heads
+        )
+
+
+def _validate_attention_dimensions(
+    d_model: int, n_heads: int, n_kv_heads: int
+) -> None:
+    if d_model % n_heads != 0:
+        raise ValueError("d_model must be divisible by n_heads")
+    if n_heads % n_kv_heads != 0:
+        raise ValueError("n_heads must be divisible by n_kv_heads")
+    if (d_model // n_heads) % 2 != 0:
+        raise ValueError("head_dim (d_model // n_heads) must be even")
 
 
 def vanilla_config() -> ModelConfig:
@@ -65,7 +104,23 @@ def vanilla_config() -> ModelConfig:
 def shared_config() -> ModelConfig:
     return replace(vanilla_config(), n_routed_experts = 8, n_shared_experts = 1, top_k = 2)
 
-def count_parameters(config: ModelConfig) -> dict[str, int]:
+def aoe_config() -> AoEConfig:
+    return AoEConfig(
+        vocab_size=12_000,
+        n_layers=8,
+        d_model=512,
+        n_heads=8,
+        n_kv_heads=4,
+        n_experts=9,
+        top_k=3,
+        d_low=32,
+        d_wide=544,
+    )
+
+
+def _count_backbone_parameters(
+    config: Union[ModelConfig, AoEConfig],
+) -> tuple[int, int, int]:
     d_model = config.d_model
     n_layers = config.n_layers
     head_dim = d_model // config.n_heads
@@ -74,6 +129,13 @@ def count_parameters(config: ModelConfig) -> dict[str, int]:
     embedding_head = config.vocab_size * d_model # Tính toán số lượng tham số trong lớp embedding: vocab_size * d_model
     attention = n_layers * (2 * d_model * d_model + 2 * d_model * kv_dim) # Tính toán số lượng tham số trong các lớp attention
     rmsnorm = (2 * n_layers + 1) * d_model
+    return embedding_head, attention, rmsnorm
+
+
+def count_parameters(config: ModelConfig) -> dict[str, int]:
+    d_model = config.d_model
+    n_layers = config.n_layers
+    embedding_head, attention, rmsnorm = _count_backbone_parameters(config)
     router = n_layers * d_model * config.n_routed_experts
 
     per_expert = 3 * d_model * config.expert_hidden_dim
@@ -92,15 +154,41 @@ def count_parameters(config: ModelConfig) -> dict[str, int]:
         "active": base + expert_active,
     }
 
+
+def count_aoe_parameters(config: AoEConfig) -> dict[str, int]:
+    embedding_head, attention, rmsnorm = _count_backbone_parameters(config)
+    backbone = embedding_head + attention + rmsnorm
+
+    down = config.d_model * config.d_low
+    remaining = (config.d_low + 2 * config.d_model) * config.d_wide
+
+    expert_total = config.n_layers * config.n_experts * (down + remaining)
+    expert_active = config.n_layers * (
+        config.n_experts * down + config.top_k * remaining
+    )
+
+    return {
+        "embedding_head": embedding_head,
+        "attention": attention,
+        "rmsnorm": rmsnorm,
+        "router": 0,
+        "expert_total": expert_total,
+        "expert_active": expert_active,
+        "total": backbone + expert_total,
+        "active": backbone + expert_active,
+    }
+
+
 if __name__ == "__main__":
-    for name, config, expected_total, expected_active in (
-        ("Vanilla", vanilla_config(), 54_948_352, 26_636_800),
-        ("Shared", shared_config(), 54_944_256, 26_632_704),
+    print(f"{'Preset':<8} {'total':>12} {'active':>12}")
+    for name, counts, expected_total, expected_active in (
+        ("Vanilla", count_parameters(vanilla_config()), 54_948_352, 26_636_800),
+        ("Shared", count_parameters(shared_config()), 54_944_256, 26_632_704),
+        ("AoE", count_aoe_parameters(aoe_config()), 54_985_216, 27_410_944),
     ):
-        counts = count_parameters(config)
         assert counts["total"] == expected_total, (name, counts)
         assert counts["active"] == expected_active, (name, counts)
-        print(f"{name}: total={counts['total']:_}, active={counts['active']:_}")
+        print(f"{name:<8} {counts['total']:>12,} {counts['active']:>12,}")
 
     small = ModelConfig(
         vocab_size=32,
@@ -126,10 +214,14 @@ if __name__ == "__main__":
     }, counts
     print(f"Small: total={counts['total']:_}, active={counts['active']:_}")
 
-    try:
-        replace(small, top_k=4)
-    except ValueError as error:
-        assert "top_k" in str(error), error
-        print(f"Invalid config: {error}")
-    else:
-        raise AssertionError("Expected ValueError for invalid top_k")
+    for name, config, invalid_top_k in (
+        ("Small", small, 4),
+        ("AoE", aoe_config(), 10),
+    ):
+        try:
+            replace(config, top_k=invalid_top_k)
+        except ValueError as error:
+            assert "top_k" in str(error), error
+            print(f"Invalid {name} config: {error}")
+        else:
+            raise AssertionError(f"Expected ValueError for {name} top_k={invalid_top_k}")
