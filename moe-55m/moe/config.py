@@ -75,7 +75,14 @@ class AoEConfig:
             raise ValueError("top_k must be an integer in [1, n_routed_experts]")
         if self.aoe_rank >= self.d_model:
             raise ValueError("aoe_rank must be less than d_model")
-        
+        """
+        if not (self.aoe_rank < self.d_model < self.expert_hidden_dim):
+            raise ValueError(
+                "AoE requires aoe_rank < d_model < expert_hidden_dim, "
+                f"got {self.aoe_rank}, {self.d_model}, {self.expert_hidden_dim}"
+            )
+        """
+
         _validate_attention_dimensions(
             self.d_model, self.n_heads, self.n_kv_heads
         )
