@@ -2,9 +2,10 @@ import torch
 from torch import nn
 
 from .attention import CausalSelfAttention
-from .config import ModelConfig
+from .config import ModelConfig, UoEConfig
 from .layers import RMSNorm
 from .moe_layer import MoELayer
+from .uoe import UoELayer
 
 class TransformerBlock(nn.Module):
     def __init__(self, config: ModelConfig,) -> None:
@@ -13,7 +14,10 @@ class TransformerBlock(nn.Module):
         self.attention = CausalSelfAttention(config)
 
         self.moe_norm = RMSNorm(dim = config.d_model, eps = 1e-5)
-        self.moe = MoELayer(config)
+        if isinstance(config, UoEConfig):
+            self.moe = UoELayer(config)
+        else:
+            self.moe = MoELayer(config)
 
     def forward(self, x: torch.Tensor,) -> tuple[torch.Tensor, torch.Tensor]:
         x = x + self.attention(self.attn_norm(x)) # Residual connection for attention 
@@ -63,7 +67,7 @@ class MoELanguageModel(nn.Module):
 
         x = self.final_norm(x)
         # logits: tensor dự đoán xác suất cho từng token trong từ điển, có kích thước (batch_size, seq_len, vocab_size)
-        # router_logits_per_layer: tuple chứa các tensor dự đoán xác suất cho từng expert
+        # Router logits or UoE L2 scores before softmax, in block order.
         logits = self.lm_head(x)
 
         return logits, tuple(router_logits_per_layer)
